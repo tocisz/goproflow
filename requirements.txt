@@ -1,0 +1,7 @@
+py-gpmf-parser
+pandas
+matplotlib
+numpy
+scipy
+plotly
+nbformat>=4.2.0
