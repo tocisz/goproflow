@@ -61,15 +61,15 @@ def extract_fragment(
 ) -> bool:
     """Extract a fragment from source_mp4 using lossless cut on keyframes."""
     start_tc = seconds_to_timecode(start_sec)
-    duration = end_sec - start_sec
+    end_tc = seconds_to_timecode(end_sec)
     
     cmd = [
         "ffmpeg",
-        "-ss", start_tc,
         "-i", str(source_mp4),
-        "-ss", "0",
-        "-c", "copy",
-        "-t", str(duration),
+        "-ss", start_tc,
+        "-to", end_tc,
+        "-c:v", "copy",
+        "-c:a", "copy",
         "-avoid_negative_ts", "make_zero",
         "-fflags", "+igndts",
         "-y",  # overwrite output
@@ -80,16 +80,22 @@ def extract_fragment(
     return run_ffmpeg(cmd)
 
 
-def concatenate_fragments(
+def concatenate_and_mux_subtitles(
     fragment_paths: List[Path],
-    output_mp4: Path
+    output_mp4: Path,
+    srt_content: str
 ) -> bool:
-    """Concatenate fragments using ffmpeg concat demuxer."""
+    """Concatenate fragments and mux subtitles in a single ffmpeg pass."""
     # Create concat demuxer file
     with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
         concat_file = Path(f.name)
         for frag in fragment_paths:
             f.write(f"file '{frag.absolute()}'\n")
+    
+    # Create SRT file
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.srt', delete=False) as f:
+        srt_file = Path(f.name)
+        f.write(srt_content)
     
     try:
         cmd = [
@@ -97,16 +103,21 @@ def concatenate_fragments(
             "-f", "concat",
             "-safe", "0",
             "-i", str(concat_file),
-            "-c", "copy",
+            "-i", str(srt_file),
+            "-c:v", "copy",
+            "-c:a", "copy",
+            "-c:s", "mov_text",
+            "-metadata:s:s:0", "language=eng",
             "-y",  # overwrite output
             str(output_mp4)
         ]
         
-        print(f"Concatenating {len(fragment_paths)} fragments into {output_mp4.name}...")
+        print(f"Concatenating {len(fragment_paths)} fragments with subtitles into {output_mp4.name}...")
         success = run_ffmpeg(cmd)
         return success
     finally:
         concat_file.unlink(missing_ok=True)
+        srt_file.unlink(missing_ok=True)
 
 
 def format_creation(creation_str: str) -> str:
@@ -161,37 +172,6 @@ def generate_subtitles_srt(
         current_time += duration
     
     return "\n".join(srt_lines)
-
-
-def mux_subtitles(
-    video_mp4: Path,
-    srt_content: str,
-    output_with_subs: Path
-) -> bool:
-    """Mux subtitle track into video file."""
-    # Write SRT file temporarily
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.srt', delete=False) as f:
-        srt_file = Path(f.name)
-        f.write(srt_content)
-    
-    try:
-        cmd = [
-            "ffmpeg",
-            "-i", str(video_mp4),
-            "-i", str(srt_file),
-            "-c:v", "copy",
-            "-c:a", "copy",
-            "-c:s", "mov_text",
-            "-metadata:s:s:0", "language=eng",
-            "-y",  # overwrite output
-            str(output_with_subs)
-        ]
-        
-        print(f"Muxing subtitles into {output_with_subs.name}...")
-        success = run_ffmpeg(cmd)
-        return success
-    finally:
-        srt_file.unlink(missing_ok=True)
 
 
 def process_index(
@@ -253,27 +233,18 @@ def process_index(
             work_dir.rmdir()
             continue
         
-        # Concatenate fragments
+        # Concatenate fragments with subtitles in a single pass
         output_name = f"output_{resolution}.mp4"
         output_mp4 = output_dir / output_name
         
-        if concatenate_fragments(extracted_fragments, output_mp4):
-            print(f"  -> Created {output_mp4}")
-        else:
-            print("  Error: failed to concatenate fragments")
-            continue
-        
-        # Generate and mux subtitles
+        # Generate subtitles
         srt_content = generate_subtitles_srt(file_fragments, fragment_durations)
-        output_with_subs = output_dir / f"output_{resolution}_with_subs.mp4"
         
-        if mux_subtitles(output_mp4, srt_content, output_with_subs):
-            # Replace original with subtitle version
-            output_mp4.unlink()
-            output_with_subs.rename(output_mp4)
-            print(f"  -> Added subtitle track to {output_mp4}")
+        if concatenate_and_mux_subtitles(extracted_fragments, output_mp4, srt_content):
+            print(f"  -> Created {output_mp4} with subtitle track")
         else:
-            print("  Warning: failed to mux subtitles, keeping video without subtitles")
+            print("  Error: failed to concatenate and mux subtitles")
+            continue
         
         # Cleanup or keep fragments
         if keep_fragments:
