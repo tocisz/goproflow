@@ -20,8 +20,16 @@ def extract_cori_quats(video_path):
     q = np.asarray(q)
     t = np.asarray(t)
 
+    # Handle missing or empty telemetry gracefully
+    if q.size == 0:
+        return np.empty((0, 4)), np.empty((0,))
+
     if q.ndim == 1:
-        q = q.reshape(1, 4)
+        # If a single quaternion of length 4, reshape; otherwise treat as empty
+        if q.size == 4:
+            q = q.reshape(1, 4)
+        else:
+            return np.empty((0, 4)), t
 
     return q, t
 
@@ -34,8 +42,9 @@ def cori_sliding_rms(video_path, sliding_window_s=1.0):
       sliding_rms    → sliding RMS of angle_deg
     """
     q_wxyz, t = extract_cori_quats(video_path)
+    # If no telemetry, return empty arrays (caller will fallback to full-file fragment)
     if q_wxyz.size == 0:
-        return None, None, None
+        return np.array([]), np.array([]), np.array([]), np.array([])
 
     # Convert to scipy xyz-w
     q_xyzw = q_wxyz[:, [1,2,3,0]]
@@ -74,6 +83,29 @@ def cori_sliding_rms(video_path, sliding_window_s=1.0):
     sliding_rms = np.concatenate([sliding_rms[half_len:len(t)], [sliding_rms[-1]] * half_len])  # Ensure same length
 
     return t, angle_deg, angle_acc, sliding_rms
+
+
+def extract_video_duration(video_path):
+    """Return video duration in seconds (float) or None on failure."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "json",
+                str(video_path)
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        data = json.loads(result.stdout)
+        dur = data.get("format", {}).get("duration")
+        if dur is None:
+            return None
+        return float(dur)
+    except Exception:
+        return None
 
 
 # ------------------ VIDEO METADATA ------------------
@@ -190,7 +222,14 @@ def process_directory(
 ):
     directory = Path(directory)
 
-    for mp4 in directory.glob("*.MP4"):
+    # Iterate files case-insensitively and accept common video extensions
+    VIDEO_EXTS = {'.mp4', '.mov', '.mkv', '.avi', '.mpg', '.mpeg', '.webm'}
+    for p in sorted(directory.iterdir()):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in VIDEO_EXTS:
+            continue
+        mp4 = p
         print(f"Processing {mp4.name}...")
 
         t, angle_deg, angle_acc, sliding_rms = cori_sliding_rms(
@@ -198,12 +237,23 @@ def process_directory(
             sliding_window_s=sliding_window_s
         )
 
-        fragments = find_fragments(
-            t,
-            sliding_rms,
-            threshold=threshold,
-            min_duration_s=min_duration_s
-        )
+        # If no telemetry was available, fall back to including the whole file as one fragment
+        if sliding_rms is None or (hasattr(sliding_rms, 'size') and sliding_rms.size == 0):
+            print("  No CORI telemetry found — falling back to whole-file fragment")
+            duration = extract_video_duration(mp4)
+            if duration is None:
+                # If we can't determine duration, skip this file
+                print(f"  Warning: could not determine duration for {mp4.name}, skipping")
+                fragments = []
+            else:
+                fragments = [{"start": 0.0, "end": float(duration)}]
+        else:
+            fragments = find_fragments(
+                t,
+                sliding_rms,
+                threshold=threshold,
+                min_duration_s=min_duration_s
+            )
 
         # Extract resolution
         resolution = extract_video_resolution(mp4)
