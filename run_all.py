@@ -46,6 +46,7 @@ def main():
     parser.add_argument("--skip-noshake", action='store_true', help="Skip running noshake.py (assume JSON files exist)")
     parser.add_argument("--skip-index", action='store_true', help="Skip running index_by_resolution.py (assume index.json exists in out dir)")
     parser.add_argument("--skip-concat", action='store_true', help="Skip running concatenate_fragments.py")
+    parser.add_argument("--playlist", action='store_true', help="Alternative mode: create M3U playlist instead of merging (uses create_playlist.py)")
 
     # fragments
     parser.add_argument("--keep-fragments", action='store_true', help="Keep intermediate fragment files when concatenating")
@@ -99,21 +100,35 @@ def main():
             print(f"Error: skipped indexing but {index_json} doesn't exist")
             raise SystemExit(2)
 
-    # Step 3: concatenate_fragments.py
+    # Step 3: concatenate_fragments.py OR create_playlist.py
     if not args.skip_concat:
-        concat_py = script_dir / 'concatenate_fragments.py'
-        if not concat_py.exists():
-            print(f"Error: {concat_py} not found")
-            raise SystemExit(2)
+        if args.playlist:
+            # Alternative: create M3U playlist
+            playlist_py = script_dir / 'create_playlist.py'
+            if not playlist_py.exists():
+                print(f"Error: {playlist_py} not found")
+                raise SystemExit(2)
 
-        cmd = [py, str(concat_py), str(index_json), str(videos_dir), '--out', str(out_dir)]
-        if args.keep_fragments:
-            cmd.append('--keep-fragments')
+            cmd = [py, str(playlist_py), str(videos_dir), '--out', str(out_dir), '--index', str(index_json)]
+            print("\nCreating playlist from fragments...")
+            if not run_command(cmd):
+                print("create_playlist failed — aborting")
+                raise SystemExit(1)
+        else:
+            # Default: merge fragments per resolution
+            concat_py = script_dir / 'concatenate_fragments.py'
+            if not concat_py.exists():
+                print(f"Error: {concat_py} not found")
+                raise SystemExit(2)
 
-        print("\nExtracting and concatenating fragments per resolution...")
-        if not run_command(cmd):
-            print("concatenate_fragments failed — aborting")
-            raise SystemExit(1)
+            cmd = [py, str(concat_py), str(index_json), str(videos_dir), '--out', str(out_dir)]
+            if args.keep_fragments:
+                cmd.append('--keep-fragments')
+
+            print("\nExtracting and concatenating fragments per resolution...")
+            if not run_command(cmd):
+                print("concatenate_fragments failed — aborting")
+                raise SystemExit(1)
 
     print("\nPipeline completed — outputs in:")
     print(f"  {out_dir}")
