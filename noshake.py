@@ -51,24 +51,37 @@ def cori_sliding_rms(video_path, sliding_window_s=1.0):
     else:
         angle_deg = np.array([0.0])
 
+    # Frame-to-frame acceleration
+    if len(R_rel) > 1:
+        a_prev = R_rel[:-1]
+        a_curr = R_rel[1:]
+        accel = a_curr * a_prev.inv()
+        avecs = accel.as_rotvec()
+        angle_acc = np.concatenate([[0.0, 0.0], np.degrees(np.linalg.norm(avecs, axis=1))])
+    else:
+        angle_acc = np.array([0.0, 0.0])
+
     # Sampling frequency
     dt = np.median(np.diff(t)) if len(t) > 1 else 1.0
     fs = 1.0 / dt
 
     # ---- Sliding RMS ----
     win_samples = max(1, int(sliding_window_s * fs))
-    sq = angle_deg ** 2
+    sq = angle_acc ** 2
     kernel = np.ones(win_samples) / win_samples
     sliding_rms = np.sqrt(np.convolve(sq, kernel, mode='same'))
+    half_len = win_samples // 2
+    sliding_rms = np.concatenate([sliding_rms[half_len:len(t)], [sliding_rms[-1]] * half_len])  # Ensure same length
 
-    return t, angle_deg, sliding_rms
+    return t, angle_deg, angle_acc, sliding_rms
 
 
 # ------------------ VIDEO METADATA ------------------
 
 def extract_video_resolution(video_path):
     """
-    Extract video resolution using ffprobe.
+    Extract video resolution using ffprobe, accounting for rotation.
+    If rotation is 90° or 270°, swap width and height to reflect logical dimensions.
     Returns: {"width": int, "height": int} or None if extraction fails
     """
     try:
@@ -77,6 +90,7 @@ def extract_video_resolution(video_path):
                 "ffprobe", "-v", "error",
                 "-select_streams", "v:0",
                 "-show_entries", "stream=width,height",
+                "-show_entries", "stream_side_data=rotation",
                 "-of", "json",
                 str(video_path)
             ],
@@ -87,9 +101,17 @@ def extract_video_resolution(video_path):
         data = json.loads(result.stdout)
         if data.get("streams") and len(data["streams"]) > 0:
             stream = data["streams"][0]
+            width = stream.get("width")
+            height = stream.get("height")
+            rotation = stream.get("side_data_list", [{}])[0].get("rotation", 0)
+
+            # If rotation is 90 or 270, swap dimensions (logical dimensions)
+            if rotation in (90, 270, -90, -270):
+                width, height = height, width
+            
             return {
-                "width": stream.get("width"),
-                "height": stream.get("height")
+                "width": width,
+                "height": height
             }
     except Exception as e:
         print(f"  Warning: Could not extract resolution: {e}")
@@ -171,7 +193,7 @@ def process_directory(
     for mp4 in directory.glob("*.MP4"):
         print(f"Processing {mp4.name}...")
 
-        t, angle_deg, sliding_rms = cori_sliding_rms(
+        t, angle_deg, angle_acc, sliding_rms = cori_sliding_rms(
             mp4,
             sliding_window_s=sliding_window_s
         )
